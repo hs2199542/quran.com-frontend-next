@@ -1,6 +1,7 @@
+// src/utils/api.ts
+
 import { decamelizeKeys } from 'humps';
 
-// Fix import order: isClient should come before stringify if it's a relative import
 import isClient from './isClient';
 import stringify from './qs-stringify';
 
@@ -79,9 +80,11 @@ export const getMushafId = (
   const mushaf = QuranFontMushaf[quranFont];
   // convert the Indopak mushaf to either 15 or 16 lines Mushaf
   if (quranFont === QuranFont.IndoPak && mushafLines) {
-    // Fix prefer-const issue in local scope
     return {
-      mushaf: mushafLines === MushafLines.FifteenLines ? Mushaf.Indopak15Lines : Mushaf.Indopak16Lines,
+      mushaf:
+        mushafLines === MushafLines.FifteenLines
+          ? Mushaf.Indopak15Lines
+          : Mushaf.Indopak16Lines,
     };
   }
   return { mushaf };
