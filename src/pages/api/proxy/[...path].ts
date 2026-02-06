@@ -55,7 +55,6 @@ const verifySignature = (req: NextApiRequest, res: NextApiResponse): boolean => 
   return true;
 };
 
-// Extracted helper to construct headers and body logic
 const getRequestOptions = (req: NextApiRequest) => {
   const headers = new Headers();
   let body: BodyInit | undefined;
@@ -95,31 +94,31 @@ const customFetch = async (
 ): Promise<Response> => {
   const targetUrl = `${targetHost}${apiPath}`;
   
-  // Security checks (Max 8 lines)
+  // Security checks
   const origin = req.headers.origin || req.headers.referer;
   if (origin && !isOriginAllowed(origin)) {
     res.status(403).json({ error: ERROR_MESSAGES.FORBIDDEN });
     throw new Error(ERROR_MESSAGES.FORBIDDEN);
-  } else if (!origin && !verifySignature(req, res)) {
+  }
+  if (!origin && !verifySignature(req, res)) {
     throw new Error(ERROR_MESSAGES.FORBIDDEN);
   }
 
   const options = getRequestOptions(req);
-  console.log(`[API Proxy] Trying: ${targetUrl}`); // Warning: Unexpected console statement.
+  console.log(`[API Proxy] Trying: ${targetUrl}`);
 
-  let response: Response;
   try {
-    response = await fetch(targetUrl, options);
+    const response = await fetch(targetUrl, options);
+    if (response.status >= 500 && response.status <= 599) {
+      console.warn(`[API Proxy] Server error (${response.status}) from ${targetHost}`);
+      throw new Error('SERVER_ERROR');
+    }
+    return response;
   } catch (e) {
+    if (e instanceof Error && e.message === ERROR_MESSAGES.FORBIDDEN) throw e;
     console.warn(`[API Proxy] Network failure to ${targetHost}`);
     throw new Error('NETWORK_FAILURE');
   }
-
-  if (response.status >= 500 && response.status <= 599) {
-    console.warn(`[API Proxy] Server error (${response.status}) from ${targetHost}`);
-    throw new Error('SERVER_ERROR');
-  }
-  return response;
 };
 
 const handleSuccessfulResponse = (finalResponse: Response, res: NextApiResponse): void => {
@@ -134,7 +133,6 @@ const handleSuccessfulResponse = (finalResponse: Response, res: NextApiResponse)
   const proxyCookies = finalResponse.headers.get('set-cookie');
   if (proxyCookies) res.setHeader('Set-Cookie', proxyCookies);
 
-  // Set anti-caching headers (Fixes formatting errors)
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -147,20 +145,17 @@ const handleSuccessfulResponse = (finalResponse: Response, res: NextApiResponse)
   }
 };
 
-
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const path = req.query.path as string[];
-  const apiPath = `/${path.join('/')}`;
-
+  const apiPath = `/${(req.query.path as string[]).join('/')}`;
   const isAuthEndpoint = apiPath.startsWith('/auth');
 
   const primaryHost = isAuthEndpoint ? AUTH_LOCAL_API_HOST : LOCAL_API_HOST;
   const fallbackHost = isAuthEndpoint ? AUTH_PUBLIC_API_HOST : PUBLIC_API_HOST;
 
   let finalResponse: Response | null = null;
-  let primaryFailed = false;
+  let primary Failed = false;
 
-  // 1. Attempt Primary Host (Max 15 lines)
+  // 1. Attempt Primary Host
   if (primaryHost) {
     try {
       finalResponse = await customFetch(req, res, primaryHost, apiPath);
