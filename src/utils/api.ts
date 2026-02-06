@@ -1,8 +1,8 @@
 import { decamelizeKeys } from 'humps';
 
-import stringify from './qs-stringify';
-// Correct: import isClient from './isClient';
+// Fix import order: isClient should come before stringify if it's a relative import
 import isClient from './isClient';
+import stringify from './qs-stringify';
 
 import { Mushaf, MushafLines, QuranFont, QuranFontMushaf } from '@/types/QuranReader';
 
@@ -23,18 +23,17 @@ const API_ROOT_PATH = '/api/qdc';
 export const makeUrl = (path: string, parameters?: Record<string, unknown>): string => {
   let baseUrl: string;
 
-  // CRITICAL FIX: Use 'isClient' without parentheses
   if (isClient) {
-      // Client-side requests always hit the Next.js proxy route, which includes the /api/proxy prefix.
-      baseUrl = `/api/proxy${API_ROOT_PATH}${path}`;
+    // Client-side requests always hit the Next.js proxy route, which includes the /api/proxy prefix.
+    baseUrl = `/api/proxy${API_ROOT_PATH}${path}`;
   } else {
-      // Server-side requests (SSR/SSG) use the direct absolute path defined in ENV.
-      // The fallback logic is handled within the /api/proxy route itself when the client calls it.
-      // For SSR/SSG fetching, we assume the primary host or the fallback if primary is missing.
-      const apiHost = process.env.QURAN_API_HOST || process.env.QURAN_PUBLIC_API_HOST || 'https://api.quran.com';
-      baseUrl = `${apiHost}${API_ROOT_PATH}${path}`;
+    // Server-side requests (SSR/SSG) use the direct absolute path defined in ENV.
+    // The fallback logic is handled within the /api/proxy route itself when the client calls it.
+    // For SSR/SSG fetching, we assume the primary host or the fallback if primary is missing.
+    const apiHost =
+      process.env.QURAN_API_HOST || process.env.QURAN_PUBLIC_API_HOST || 'https://api.quran.com';
+    baseUrl = `${apiHost}${API_ROOT_PATH}${path}`;
   }
-
 
   if (!parameters) {
     return baseUrl;
@@ -77,11 +76,13 @@ export const getMushafId = (
   quranFont: QuranFont = QuranFont.QPCHafs,
   mushafLines?: MushafLines,
 ): { mushaf: Mushaf } => {
-  let mushaf = QuranFontMushaf[quranFont];
+  const mushaf = QuranFontMushaf[quranFont];
   // convert the Indopak mushaf to either 15 or 16 lines Mushaf
   if (quranFont === QuranFont.IndoPak && mushafLines) {
-    mushaf =
-      mushafLines === MushafLines.FifteenLines ? Mushaf.Indopak15Lines : Mushaf.Indopak16Lines;
+    // Fix prefer-const issue in local scope
+    return {
+      mushaf: mushafLines === MushafLines.FifteenLines ? Mushaf.Indopak15Lines : Mushaf.Indopak16Lines,
+    };
   }
   return { mushaf };
 };
