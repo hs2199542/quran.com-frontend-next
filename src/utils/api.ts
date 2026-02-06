@@ -1,7 +1,7 @@
 import { decamelizeKeys } from 'humps';
 
 import stringify from './qs-stringify';
-// CORRECTED: Change { isClient } to import isClient
+// Correct: import isClient from './isClient';
 import isClient from './isClient';
 
 import { Mushaf, MushafLines, QuranFont, QuranFontMushaf } from '@/types/QuranReader';
@@ -23,7 +23,8 @@ const API_ROOT_PATH = '/api/qdc';
 export const makeUrl = (path: string, parameters?: Record<string, unknown>): string => {
   let baseUrl: string;
 
-  if (isClient()) {
+  // CRITICAL FIX: Use 'isClient' without parentheses
+  if (isClient) {
       // Client-side requests always hit the Next.js proxy route, which includes the /api/proxy prefix.
       baseUrl = `/api/proxy${API_ROOT_PATH}${path}`;
   } else {
