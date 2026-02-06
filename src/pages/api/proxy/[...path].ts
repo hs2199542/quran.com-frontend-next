@@ -1,6 +1,6 @@
 import { NextApiRequest, NextApiResponse } from 'next';
 import { EventEmitter } from 'events';
-import { Readable } from 'stream'; // Import Readable stream utility
+import { Readable } from 'stream';
 
 import generateSignature from '@/utils/auth/signature';
 import {
@@ -36,8 +36,7 @@ const isOriginAllowed = (origin: string | undefined): boolean => {
   try {
     const url = new URL(origin);
     const { hostname } = url;
-    // FIX: Using ALLOWED_DOMAINS instead of the mistyped ALLOWED_DOMS
-    return ALLOWED_DOMAINS.includes(hostname); 
+    return ALLOWED_DOMAINS.includes(hostname);
   } catch (e) {
     return false;
   }
@@ -61,43 +60,10 @@ const verifySignature = (req: NextApiRequest, res: NextApiResponse): boolean => 
   return true;
 };
 
-const attachSignatureHeaders = (req: NextApiRequest, headers: Headers) => {
-  const requestUrl = `${process.env.API_GATEWAY_URL}${req.url}`;
-  const { signature, timestamp } = generateSignature(
-    req,
-    requestUrl,
-    process.env.SIGNATURE_TOKEN as string,
-  );
-
-  headers.set(X_AUTH_SIGNATURE, signature);
-  headers.set(X_TIMESTAMP, timestamp);
-  headers.set(X_INTERNAL_CLIENT, process.env.INTERNAL_CLIENT_ID || 'QDC_WEB');
-};
-
-// --- Custom Fetch Handler with Fallback Logic ---
-
-const customFetch = async (
-  req: NextApiRequest,
-  res: NextApiResponse,
-  targetHost: string,
-  apiPath: string,
-) => {
-  const targetUrl = `${targetHost}${apiPath}`;
-  
-  // 1. Check Origin/Signature (Permission check)
-  const origin = req.headers.origin || req.headers.referer;
-  // Use isOriginAllowed here which now correctly references ALLOWED_DOMAINS
-  if (origin && !isOriginAllowed(origin)) { 
-    res.status(403).json({ error: ERROR_MESSAGES.FORBIDDEN });
-    throw new Error(ERROR_MESSAGES.FORBIDDEN);
-  } else if (!origin && !verifySignature(req, res)) {
-    // If signature verification fails, verifySignature sends the 403 response
-    throw new Error(ERROR_MESSAGES.FORBIDDEN);
-  }
-
-  // 2. Prepare Headers and Body
+const getRequestOptions = (req: NextApiRequest, rawBody: unknown) => {
   const headers = new Headers();
-  
+
+  // Copy incoming headers
   Object.keys(req.headers).forEach((key) => {
     const headerKey = key.toLowerCase();
     if (!['host', 'content-length', 'connection', 'accept-encoding'].includes(headerKey)) {
@@ -108,42 +74,65 @@ const customFetch = async (
     }
   });
 
-  attachSignatureHeaders(req, headers);
+  // Attach internal signature headers
+  const requestUrl = `${process.env.API_GATEWAY_URL}${req.url}`;
+  const { signature, timestamp } = generateSignature(
+    req,
+    requestUrl,
+    process.env.SIGNATURE_TOKEN as string,
+  );
+  headers.set(X_AUTH_SIGNATURE, signature);
+  headers.set(X_TIMESTAMP, timestamp);
+  headers.set(X_INTERNAL_CLIENT, process.env.INTERNAL_CLIENT_ID || 'QDC_WEB');
   
-  let body: BodyInit | undefined = undefined;
+  let body: BodyInit | undefined;
+  
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-      let rawBody = req.body;
-      if (typeof rawBody === 'undefined' || rawBody === null) {
-          // No body available
-      } else if (Buffer.isBuffer(rawBody)) {
-          body = rawBody;
-      } else {
-          // Fallback if body was parsed by accident (e.g., small JSON payload)
-          body = JSON.stringify(rawBody);
-          if (!headers.get('Content-Type')) {
-            headers.set('Content-Type', 'application/json');
-          }
+    if (Buffer.isBuffer(rawBody)) {
+      body = rawBody;
+    } else if (rawBody) {
+      body = JSON.stringify(rawBody);
+      if (!headers.get('Content-Type')) {
+        headers.set('Content-Type', 'application/json');
       }
+    }
   }
 
-  const options: RequestInit = {
-    method: req.method,
-    headers: headers,
-    body: body,
-  };
+  return { method: req.method, headers, body };
+};
 
-  // 3. Perform Fetch Request
+// --- Custom Fetch Handler (Simplified for line count) ---
+
+const customFetch = async (
+  req: NextApiRequest,
+  res: NextApiResponse,
+  targetHost: string,
+  apiPath: string,
+) => {
+  const targetUrl = `${targetHost}${apiPath}`;
+  
+  // Security check: If response is sent here (e.g., Forbidden), it throws.
+  const origin = req.headers.origin || req.headers.referer;
+  if (origin && !isOriginAllowed(origin)) {
+    res.status(403).json({ error: ERROR_MESSAGES.FORBIDDEN });
+    throw new Error(ERROR_MESSAGES.FORBIDDEN);
+  } else if (!origin && !verifySignature(req, res)) {
+    throw new Error(ERROR_MESSAGES.FORBIDDEN);
+  }
+
+  const options = getRequestOptions(req, req.body);
+
+  // Perform Fetch Request
   console.log(`[API Proxy] Trying: ${targetUrl}`);
   let response: Response;
   try {
     response = await fetch(targetUrl, options);
   } catch (e) {
-    const errorMessage = e instanceof Error ? e.message : 'Unknown network error';
-    console.warn(`[API Proxy] Network error to ${targetHost}: ${errorMessage}`);
+    console.warn(`[API Proxy] Network error to ${targetHost}`);
     throw new Error('NETWORK_FAILURE');
   }
 
-  // 4. Handle Server Errors (5xx)
+  // Handle Server Errors (5xx)
   if (response.status >= 500 && response.status <= 599) {
     console.warn(`[API Proxy] Server error (${response.status}) from ${targetHost}`);
     throw new Error('SERVER_ERROR');
@@ -152,11 +141,39 @@ const customFetch = async (
   return response;
 };
 
-// --- Main Handler ---
+// --- Main Handler (Refactored for max-lines-per-function) ---
+
+const handleSuccessfulResponse = (finalResponse: Response, res: NextApiResponse) => {
+  res.status(finalResponse.status);
+
+  finalResponse.headers.forEach((value, name) => {
+    if (!['content-encoding', 'transfer-encoding', 'connection'].includes(name.toLowerCase())) {
+      res.setHeader(name, value);
+    }
+  });
+
+  const proxyCookies = finalResponse.headers.get('set-cookie');
+  if (proxyCookies) {
+    res.setHeader('Set-Cookie', proxyCookies);
+  }
+
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
+  // Convert Web Stream (from fetch) to Node Stream (for res.pipe)
+  if (finalResponse.body) {
+    // @ts-ignore
+    Readable.fromWeb(finalResponse.body).pipe(res);
+  } else {
+    res.end();
+  }
+};
+
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const path = req.query.path as string[];
-  const apiPath = '/' + path.join('/');
+  const apiPath = `/${path.join('/')}`;
 
   const isAuthEndpoint = apiPath.startsWith('/auth');
 
@@ -166,14 +183,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   let finalResponse: Response | null = null;
   let primaryFailed = false;
 
-  // 1. Attempt Primary Host
+  // 1. Attempt Primary Host (Max 15 lines)
   if (primaryHost) {
     try {
       finalResponse = await customFetch(req, res, primaryHost, apiPath);
     } catch (e) {
-      if (e instanceof Error && e.message === ERROR_MESSAGES.FORBIDDEN) {
-        return; // Response already sent
-      }
+      if (e instanceof Error && e.message === ERROR_MESSAGES.FORBIDDEN) return;
       primaryFailed = true;
       console.warn(`[API Proxy] Primary request failed. Proceeding to fallback.`);
     }
@@ -181,45 +196,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     primaryFailed = true;
   }
   
-  // 2. Attempt Fallback Host if Primary Failed
+  // 2. Attempt Fallback Host (Max 15 lines)
   if (primaryFailed && fallbackHost) {
     try {
       finalResponse = await customFetch(req, res, fallbackHost, apiPath);
     } catch (e) {
-      if (e instanceof Error && e.message === ERROR_MESSAGES.FORBIDDEN) {
-        return; // Response already sent
-      }
+      if (e instanceof Error && e.message === ERROR_MESSAGES.FORBIDDEN) return;
       console.error(`[API Proxy] Fallback request also failed.`);
     }
   }
 
-  // 3. Send Final Response or Error
+  // 3. Send Response
   if (finalResponse) {
-    // Forward the status code and headers from the successful response
-    res.status(finalResponse.status);
-
-    finalResponse.headers.forEach((value, name) => {
-        if (!['content-encoding', 'transfer-encoding', 'connection'].includes(name.toLowerCase())) {
-            res.setHeader(name, value);
-        }
-    });
-
-    const proxyCookies = finalResponse.headers.get('set-cookie');
-    if (proxyCookies) {
-      res.setHeader('Set-Cookie', proxyCookies);
-    }
-
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-
-    // Convert Web Stream (from fetch) to Node Stream (for res.pipe)
-    if (finalResponse.body) {
-      // @ts-ignore
-      Readable.fromWeb(finalResponse.body).pipe(res);
-    } else {
-      res.end();
-    }
+    handleSuccessfulResponse(finalResponse, res);
   } else {
     // Both primary and fallback failed or were not configured
     res.status(503).json({ 
