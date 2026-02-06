@@ -1,5 +1,6 @@
 import { NextApiRequest, NextApiResponse } from 'next';
 import { EventEmitter } from 'events';
+import { Readable } from 'stream'; // Import Readable stream utility
 
 import generateSignature from '@/utils/auth/signature';
 import {
@@ -35,7 +36,7 @@ const isOriginAllowed = (origin: string | undefined): boolean => {
   try {
     const url = new URL(origin);
     const { hostname } = url;
-    return ALLOWED_DOMAINS.includes(hostname);
+    return ALLOWED_DOMS.includes(hostname);
   } catch (e) {
     return false;
   }
@@ -88,7 +89,7 @@ const customFetch = async (
     res.status(403).json({ error: ERROR_MESSAGES.FORBIDDEN });
     throw new Error(ERROR_MESSAGES.FORBIDDEN);
   } else if (!origin && !verifySignature(req, res)) {
-    // If signature verification fails, verifySignature sends the 403 response
+    // If signature verification fails, response was already sent by customFetch. Stop processing.
     throw new Error(ERROR_MESSAGES.FORBIDDEN);
   }
 
@@ -112,22 +113,28 @@ const customFetch = async (
   // Prepare body based on method
   let body: BodyInit | undefined = undefined;
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    // Since Next.js parses the body by default (unless rawBody is explicitly used), 
-    // we assume it's available on req.body for JSON APIs.
-    if (req.body) {
-        body = JSON.stringify(req.body);
-        // Ensure Content-Type is set correctly for JSON bodies
-        if (!headers.get('Content-Type')) {
+      // If bodyParser is set to false (see config export), req.body is a stream/buffer
+      // We must handle the raw body stream/buffer here, preserving the original content type
+      // We read the body into a buffer and send it directly with fetch
+      let rawBody = req.body;
+      if (typeof rawBody === 'undefined' || rawBody === null) {
+          // No body available
+      } else if (Buffer.isBuffer(rawBody)) {
+          body = rawBody;
+      } else {
+          // If body is already parsed (e.g., JSON), we stringify it back.
+          // This path is less safe if you handle mixed content types/streams.
+          body = JSON.stringify(rawBody);
+          if (!headers.get('Content-Type')) {
             headers.set('Content-Type', 'application/json');
-        }
-    }
+          }
+      }
   }
 
   const options: RequestInit = {
     method: req.method,
     headers: headers,
     body: body,
-    // Add internal proxy timeout logic if necessary, though fetch doesn't have native timeout options
   };
 
   // 3. Perform Fetch Request
@@ -158,7 +165,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const path = req.query.path as string[];
   const apiPath = '/' + path.join('/');
 
-  // Determine host based on path (simple content APIs often share a host, but auth might be separate)
+  // Determine host based on path
   const isAuthEndpoint = apiPath.startsWith('/auth');
 
   const primaryHost = isAuthEndpoint ? AUTH_LOCAL_API_HOST : LOCAL_API_HOST;
@@ -172,9 +179,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     try {
       finalResponse = await customFetch(req, res, primaryHost, apiPath);
     } catch (e) {
-      if (e.message === ERROR_MESSAGES.FORBIDDEN) {
-        // If authentication/signature failed, response was already sent by customFetch. Stop processing.
-        return;
+      if (e instanceof Error && e.message === ERROR_MESSAGES.FORBIDDEN) {
+        return; // Response already sent
       }
       primaryFailed = true;
       console.warn(`[API Proxy] Primary request failed to ${primaryHost}${apiPath}. Proceeding to fallback.`);
@@ -188,9 +194,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     try {
       finalResponse = await customFetch(req, res, fallbackHost, apiPath);
     } catch (e) {
-      if (e.message === ERROR_MESSAGES.FORBIDDEN) {
-        // If authentication/signature failed, response was already sent by customFetch. Stop processing.
-        return;
+      if (e instanceof Error && e.message === ERROR_MESSAGES.FORBIDDEN) {
+        return; // Response already sent
       }
       console.error(`[API Proxy] Fallback request also failed to ${fallbackHost}${apiPath}.`);
     }
@@ -208,7 +213,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
     });
 
-    // Handle cookies (Set-Cookie) manually as fetch doesn't merge them nicely
+    // Handle cookies (Set-Cookie) manually
     const proxyCookies = finalResponse.headers.get('set-cookie');
     if (proxyCookies) {
       res.setHeader('Set-Cookie', proxyCookies);
@@ -219,9 +224,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
 
-    // Stream body to the client
+    // Convert Web Stream (from fetch) to Node Stream (for res.pipe)
     if (finalResponse.body) {
-      finalResponse.body.pipe(res);
+      // @ts-ignore
+      Readable.fromWeb(finalResponse.body).pipe(res);
     } else {
       res.end();
     }
@@ -234,14 +240,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 }
 
-// Ensure Next.js doesn't parse the body automatically if you expect streaming, 
-// though for modern JSON/standard API interaction, the automatic parsing is usually fine.
-// We keep the size limit config from the original file.
+// Maximum request body size for API routes, aligned with backend limit for profile picture uploads
 const API_BODY_SIZE_LIMIT = process.env.API_BODY_SIZE_LIMIT || '8mb';
 
 export const config = {
   api: {
-    bodyParser: false, // Set to false to handle body manually or use a more streaming friendly approach if proxying large files. Given the original used fixRequestBody, raw streaming is usually safer for a generic proxy.
+    // Setting bodyParser to false requires manual body handling in customFetch, 
+    // but ensures compatibility with streaming and various content types.
+    bodyParser: false,
     sizeLimit: API_BODY_SIZE_LIMIT,
     responseLimit: false,
   },
