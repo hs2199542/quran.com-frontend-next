@@ -1,8 +1,8 @@
 import { decamelizeKeys } from 'humps';
 
 import stringify from './qs-stringify';
-// REMOVED: import { getProxiedServiceUrl, QuranFoundationService } from './url';
-import { isClient } from './isClient';
+// CORRECTED: Change { isClient } to import isClient
+import isClient from './isClient';
 
 import { Mushaf, MushafLines, QuranFont, QuranFontMushaf } from '@/types/QuranReader';
 
