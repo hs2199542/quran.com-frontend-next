@@ -1,7 +1,10 @@
-export const getApiBaseUrl = () => {
-  if (process.env.NEXT_PUBLIC_USE_LOCAL_BACKEND === 'true') {
-    return process.env.NEXT_PUBLIC_LOCAL_API_URL;
-  }
+// src/utils/apiBase.ts
 
-  return process.env.NEXT_PUBLIC_PUBLIC_API_URL || 'https://api.quran.com';
+const getApiBaseUrl = () => {
+  // In the new architecture, the client should exclusively use the local proxy path
+  // defined in NEXT_PUBLIC_API_BASE_URL (which we set to /api/proxy in Step 2).
+  return process.env.NEXT_PUBLIC_API_BASE_URL || '/api/proxy';
 };
+
+// Satisfy 'Prefer default export on a file with single export'
+export default getApiBaseUrl;
