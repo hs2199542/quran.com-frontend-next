@@ -13,7 +13,6 @@ import ThirdPartyScripts from '@/components/ThirdPartyScripts/ThirdPartyScripts'
 import { AuthProvider } from '@/contexts/AuthContext';
 import ToastContainerProvider from '@/dls/Toast/ToastProvider';
 import ReduxProvider from '@/redux/Provider';
-import { API_HOST } from '@/utils/api';
 import { logAndRedirectUnsupportedLogicalCSS } from '@/utils/css';
 import * as gtag from '@/utils/gtag';
 import { getDir } from '@/utils/locale';
@@ -49,7 +48,6 @@ function MyApp({ Component, pageProps }: { Component: any; pageProps: any }) {
       <Head>
         <link rel="apple-touch-icon" sizes="192x192" href="/images/logo/Logo@192x192.png" />
         <link rel="manifest" href="/manifest.json" />
-        <link rel="preconnect" href={API_HOST} />
         <script
           // eslint-disable-next-line react/no-danger
           dangerouslySetInnerHTML={{
