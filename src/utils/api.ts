@@ -2,29 +2,41 @@ import { decamelizeKeys } from 'humps';
 
 import stringify from './qs-stringify';
 import { getProxiedServiceUrl, QuranFoundationService } from './url';
+import { isClient } from './isClient';
 
 import { Mushaf, MushafLines, QuranFont, QuranFontMushaf } from '@/types/QuranReader';
 
 export const ITEMS_PER_PAGE = 10;
 
-const STAGING_API_HOST = 'https://staging.quran.com';
-const PRODUCTION_API_HOST = 'https://api.qurancdn.com';
-
+// Remove hardcoded hosts as the new logic relies on environment variables 
+// and the proxy server for fallback handling.
 const API_ROOT_PATH = '/api/qdc';
 
-// env variables in Vercel can't be dynamic, we have to hardcode the urls here. https://stackoverflow.com/questions/44342226/next-js-error-only-absolute-urls-are-supported
-export const API_HOST =
-  process.env.NEXT_PUBLIC_VERCEL_ENV === 'production' ? PRODUCTION_API_HOST : STAGING_API_HOST;
-
 /**
- * Generates a url to make an api call to our backend
+ * Generates a url to make an api call.
+ * 
+ * In client-side environments, this returns a relative URL pointing to the Next.js API proxy route.
+ * In server-side (SSR/SSG/API Routes), this returns an absolute URL to the configured QURAN_API_HOST.
  *
  * @param {string} path the path for the call
  * @param {Record<string, unknown>} parameters optional query params, {a: 1, b: 2} is parsed to "?a=1&b=2"
  * @returns {string}
  */
 export const makeUrl = (path: string, parameters?: Record<string, unknown>): string => {
-  const baseUrl = getProxiedServiceUrl(QuranFoundationService.CONTENT, `${API_ROOT_PATH}${path}`);
+  let baseUrl: string;
+
+  if (isClient()) {
+      // Client-side requests always hit the Next.js proxy route.
+      baseUrl = `/api/proxy${API_ROOT_PATH}${path}`;
+  } else {
+      // Server-side requests (SSR/SSG) use the direct absolute path defined in ENV.
+      // We use the QURAN_API_HOST here. The proxy fallback logic is ONLY in /api/proxy/[...path].ts.
+      // When making server-side calls outside the proxy route (e.g. in getStaticProps), 
+      // we primarily target QURAN_API_HOST.
+      const apiHost = process.env.QURAN_API_HOST || process.env.QURAN_PUBLIC_API_HOST || 'https://api.quran.com';
+      baseUrl = `${apiHost}${API_ROOT_PATH}${path}`;
+  }
+
 
   if (!parameters) {
     return baseUrl;
