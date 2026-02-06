@@ -1,7 +1,5 @@
-import { EventEmitter } from 'events';
-
-import { createProxyMiddleware, fixRequestBody } from 'http-proxy-middleware';
 import { NextApiRequest, NextApiResponse } from 'next';
+import { EventEmitter } from 'events';
 
 import generateSignature from '@/utils/auth/signature';
 import {
@@ -12,45 +10,38 @@ import {
   X_PROXY_TIMESTAMP,
 } from '@/utils/headers';
 
+// Environment Variables for Fallback
+const LOCAL_API_HOST = process.env.QURAN_API_HOST;
+const AUTH_LOCAL_API_HOST = process.env.AUTH_API_HOST;
+const PUBLIC_API_HOST = process.env.QURAN_PUBLIC_API_HOST || 'https://api.quran.com';
+const AUTH_PUBLIC_API_HOST = process.env.AUTH_PUBLIC_API_HOST || 'https://api.quran.com';
+
 const ERROR_MESSAGES = {
   PROXY_ERROR: 'Proxy error',
-  PROXY_HANDLER_ERROR: 'Proxy handler error',
   FORBIDDEN: 'Forbidden',
+  SERVICE_UNAVAILABLE: 'Service Unavailable. Could not connect to primary or fallback API endpoints.',
 };
 
 const ALLOWED_DOMAINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((domain) => domain.trim());
 
-// This line increases the default maximum number of event listeners for the EventEmitter to a better number like 20.
-// It is necessary to prevent memory leak warnings when multiple listeners are added,
-// which can occur in a proxy setup like this where multiple requests are handled concurrently.
 EventEmitter.defaultMaxListeners = Number(process.env.PROXY_DEFAULT_MAX_LISTENERS) || 100;
+
+// --- Helper Functions from Original Code (Adjusted for fetch environment) ---
 
 const isOriginAllowed = (origin: string | undefined): boolean => {
   if (!origin) return false;
-  const url = new URL(origin);
-  const { hostname } = url;
-  return ALLOWED_DOMAINS.includes(hostname);
-};
-
-const handleProxyReq = (proxyReq, req, res) => {
-  const origin = req.headers.origin || req.headers.referer || '';
-  if (origin) {
-    if (!isOriginAllowed(origin)) {
-      res.status(403).send({ error: ERROR_MESSAGES.FORBIDDEN });
-      return;
-    }
-  } else if (!verifySignature(req, res)) {
-    return;
+  try {
+    const url = new URL(origin);
+    const { hostname } = url;
+    return ALLOWED_DOMAINS.includes(hostname);
+  } catch (e) {
+    return false;
   }
-
-  attachCookies(proxyReq, req);
-  attachSignatureHeaders(proxyReq, req);
-  fixRequestBody(proxyReq, req);
 };
 
-const verifySignature = (req, res) => {
+const verifySignature = (req: NextApiRequest, res: NextApiResponse): boolean => {
   const protocol = req.headers['x-forwarded-proto'] || 'http';
   const requestUrl = `${protocol}://${req.headers.host}/api/proxy${req.url}`;
   const timestampHeader = req.headers[X_PROXY_TIMESTAMP] as string;
@@ -62,19 +53,13 @@ const verifySignature = (req, res) => {
   );
 
   if (req.headers[X_PROXY_SIGNATURE] !== signature) {
-    res.status(403).send({ error: ERROR_MESSAGES.FORBIDDEN });
+    res.status(403).json({ error: ERROR_MESSAGES.FORBIDDEN });
     return false;
   }
   return true;
 };
 
-const attachCookies = (proxyReq, req) => {
-  if (req.headers.cookie) {
-    proxyReq.setHeader('Cookie', req.headers.cookie);
-  }
-};
-
-const attachSignatureHeaders = (proxyReq, req) => {
+const attachSignatureHeaders = (req: NextApiRequest, headers: Headers) => {
   const requestUrl = `${process.env.API_GATEWAY_URL}${req.url}`;
   const { signature, timestamp } = generateSignature(
     req,
@@ -82,72 +67,182 @@ const attachSignatureHeaders = (proxyReq, req) => {
     process.env.SIGNATURE_TOKEN as string,
   );
 
-  proxyReq.setHeader(X_AUTH_SIGNATURE, signature);
-  proxyReq.setHeader(X_TIMESTAMP, timestamp);
-  proxyReq.setHeader(X_INTERNAL_CLIENT, process.env.INTERNAL_CLIENT_ID);
+  headers.set(X_AUTH_SIGNATURE, signature);
+  headers.set(X_TIMESTAMP, timestamp);
+  headers.set(X_INTERNAL_CLIENT, process.env.INTERNAL_CLIENT_ID || 'QDC_WEB');
 };
 
-const apiProxy = createProxyMiddleware<NextApiRequest, NextApiResponse>({
-  target: process.env.API_GATEWAY_URL,
-  changeOrigin: true,
-  pathRewrite: { '^/api/proxy': '' }, // eslint-disable-line @typescript-eslint/naming-convention
-  secure: process.env.NEXT_PUBLIC_VERCEL_ENV === 'production', // Disable SSL verification to avoid UNABLE_TO_VERIFY_LEAF_SIGNATURE error for dev
-  logger: console,
+// --- Custom Fetch Handler with Fallback Logic ---
 
-  on: {
-    proxyReq: handleProxyReq,
+const customFetch = async (
+  req: NextApiRequest,
+  res: NextApiResponse,
+  targetHost: string,
+  apiPath: string,
+) => {
+  const targetUrl = `${targetHost}${apiPath}`;
+  
+  // 1. Check Origin/Signature (Permission check from original handleProxyReq)
+  const origin = req.headers.origin || req.headers.referer;
+  if (origin && !isOriginAllowed(origin)) {
+    res.status(403).json({ error: ERROR_MESSAGES.FORBIDDEN });
+    throw new Error(ERROR_MESSAGES.FORBIDDEN);
+  } else if (!origin && !verifySignature(req, res)) {
+    // If signature verification fails, verifySignature sends the 403 response
+    throw new Error(ERROR_MESSAGES.FORBIDDEN);
+  }
 
-    proxyRes: (proxyRes, req, res) => {
-      // Set cookies from the proxy response to the original response
-      const proxyCookies = proxyRes.headers['set-cookie'];
-      if (proxyCookies) {
-        res.setHeader('Set-Cookie', proxyCookies);
+  // 2. Prepare Headers and Body
+  const headers = new Headers();
+  
+  // Copy necessary incoming headers, excluding those managed by Next.js or problematic for fetch
+  Object.keys(req.headers).forEach((key) => {
+    const headerKey = key.toLowerCase();
+    if (!['host', 'content-length', 'connection', 'accept-encoding'].includes(headerKey)) {
+      const value = req.headers[key];
+      if (value) {
+        headers.set(key, Array.isArray(value) ? value.join(',') : value);
       }
+    }
+  });
 
-      // Prevent intermediate proxy caching (Traefik, nginx, etc.)
-      // This ensures fresh data flows through from the API Gateway's CF cache
-      // Note: This does NOT affect CF caching at the API Gateway level
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-    },
+  // Attach internal signature headers
+  attachSignatureHeaders(req, headers);
+  
+  // Prepare body based on method
+  let body: BodyInit | undefined = undefined;
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    // Since Next.js parses the body by default (unless rawBody is explicitly used), 
+    // we assume it's available on req.body for JSON APIs.
+    if (req.body) {
+        body = JSON.stringify(req.body);
+        // Ensure Content-Type is set correctly for JSON bodies
+        if (!headers.get('Content-Type')) {
+            headers.set('Content-Type', 'application/json');
+        }
+    }
+  }
 
-    error: (err, req, res) => {
-      // BUGFIX: The original code was calling res.end() with a function that returns an object:
-      // res.end(() => ({ error: ERROR_MESSAGES.PROXY_ERROR, message: err.message }))
-      //
-      // This caused a TypeError because res.end() expects a string, Buffer, or ArrayBuffer,
-      // not a function. The function was being passed as the response body, which caused:
-      // "The 'string' argument must be of type string... Received type function"
-      //
-      // The fix is to properly send JSON responses based on the response object type:
+  const options: RequestInit = {
+    method: req.method,
+    headers: headers,
+    body: body,
+    // Add internal proxy timeout logic if necessary, though fetch doesn't have native timeout options
+  };
 
-      // Check if res is a NextApiResponse (has status method) or a Socket
-      if ('status' in res && typeof res.status === 'function') {
-        res.status(500).json({ error: ERROR_MESSAGES.PROXY_ERROR, message: err.message });
-      } else {
-        // For Socket or other types, just end the response with a stringified error
-        res.end(JSON.stringify({ error: ERROR_MESSAGES.PROXY_ERROR, message: err.message }));
+  // 3. Perform Fetch Request
+  console.log(`[API Proxy] Trying: ${targetUrl}`);
+  let response: Response;
+  try {
+    response = await fetch(targetUrl, options);
+  } catch (e) {
+    // Catch network/connection errors only
+    const errorMessage = e instanceof Error ? e.message : 'Unknown network error';
+    console.warn(`[API Proxy] Network error to ${targetHost}: ${errorMessage}`);
+    throw new Error('NETWORK_FAILURE');
+  }
+
+  // 4. Handle Server Errors (5xx)
+  if (response.status >= 500 && response.status <= 599) {
+    console.warn(`[API Proxy] Server error (${response.status}) from ${targetHost}`);
+    throw new Error('SERVER_ERROR');
+  }
+
+  // 5. Successful response (2xx, 3xx, or 4xx errors are forwarded to client)
+  return response;
+};
+
+// --- Main Handler ---
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const path = req.query.path as string[];
+  const apiPath = '/' + path.join('/');
+
+  // Determine host based on path (simple content APIs often share a host, but auth might be separate)
+  const isAuthEndpoint = apiPath.startsWith('/auth');
+
+  const primaryHost = isAuthEndpoint ? AUTH_LOCAL_API_HOST : LOCAL_API_HOST;
+  const fallbackHost = isAuthEndpoint ? AUTH_PUBLIC_API_HOST : PUBLIC_API_HOST;
+
+  let finalResponse: Response | null = null;
+  let primaryFailed = false;
+
+  // 1. Attempt Primary Host
+  if (primaryHost) {
+    try {
+      finalResponse = await customFetch(req, res, primaryHost, apiPath);
+    } catch (e) {
+      if (e.message === ERROR_MESSAGES.FORBIDDEN) {
+        // If authentication/signature failed, response was already sent by customFetch. Stop processing.
+        return;
       }
-    },
-  },
-});
+      primaryFailed = true;
+      console.warn(`[API Proxy] Primary request failed to ${primaryHost}${apiPath}. Proceeding to fallback.`);
+    }
+  } else {
+    primaryFailed = true;
+  }
+  
+  // 2. Attempt Fallback Host if Primary Failed
+  if (primaryFailed && fallbackHost) {
+    try {
+      finalResponse = await customFetch(req, res, fallbackHost, apiPath);
+    } catch (e) {
+      if (e.message === ERROR_MESSAGES.FORBIDDEN) {
+        // If authentication/signature failed, response was already sent by customFetch. Stop processing.
+        return;
+      }
+      console.error(`[API Proxy] Fallback request also failed to ${fallbackHost}${apiPath}.`);
+    }
+  }
 
-// Maximum request body size for API routes, aligned with backend limit for profile picture uploads
+  // 3. Send Final Response or Error
+  if (finalResponse) {
+    // Forward the status code and headers from the successful response
+    res.status(finalResponse.status);
+
+    finalResponse.headers.forEach((value, name) => {
+        // Exclude headers that should be handled by Next.js or cause issues
+        if (!['content-encoding', 'transfer-encoding', 'connection'].includes(name.toLowerCase())) {
+            res.setHeader(name, value);
+        }
+    });
+
+    // Handle cookies (Set-Cookie) manually as fetch doesn't merge them nicely
+    const proxyCookies = finalResponse.headers.get('set-cookie');
+    if (proxyCookies) {
+      res.setHeader('Set-Cookie', proxyCookies);
+    }
+
+    // Set anti-caching headers (from original code)
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    // Stream body to the client
+    if (finalResponse.body) {
+      finalResponse.body.pipe(res);
+    } else {
+      res.end();
+    }
+  } else {
+    // Both primary and fallback failed or were not configured
+    res.status(503).json({ 
+      error: ERROR_MESSAGES.SERVICE_UNAVAILABLE, 
+      path: apiPath 
+    });
+  }
+}
+
+// Ensure Next.js doesn't parse the body automatically if you expect streaming, 
+// though for modern JSON/standard API interaction, the automatic parsing is usually fine.
+// We keep the size limit config from the original file.
 const API_BODY_SIZE_LIMIT = process.env.API_BODY_SIZE_LIMIT || '8mb';
 
 export const config = {
   api: {
-    bodyParser: {
-      sizeLimit: API_BODY_SIZE_LIMIT,
-    },
+    bodyParser: false, // Set to false to handle body manually or use a more streaming friendly approach if proxying large files. Given the original used fixRequestBody, raw streaming is usually safer for a generic proxy.
+    sizeLimit: API_BODY_SIZE_LIMIT,
+    responseLimit: false,
   },
 };
-
-export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  apiProxy(req, res, (err) => {
-    if (err) {
-      res.status(500).json({ error: ERROR_MESSAGES.PROXY_HANDLER_ERROR, message: err.message });
-    }
-  });
-}
