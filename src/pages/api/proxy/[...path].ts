@@ -29,14 +29,15 @@ const ALLOWED_DOMAINS = (process.env.ALLOWED_ORIGINS || '')
 
 EventEmitter.defaultMaxListeners = Number(process.env.PROXY_DEFAULT_MAX_LISTENERS) || 100;
 
-// --- Helper Functions from Original Code (Adjusted for fetch environment) ---
+// --- Helper Functions for Security Checks ---
 
 const isOriginAllowed = (origin: string | undefined): boolean => {
   if (!origin) return false;
   try {
     const url = new URL(origin);
     const { hostname } = url;
-    return ALLOWED_DOMS.includes(hostname);
+    // FIX: Using ALLOWED_DOMAINS instead of the mistyped ALLOWED_DOMS
+    return ALLOWED_DOMAINS.includes(hostname); 
   } catch (e) {
     return false;
   }
@@ -83,20 +84,20 @@ const customFetch = async (
 ) => {
   const targetUrl = `${targetHost}${apiPath}`;
   
-  // 1. Check Origin/Signature (Permission check from original handleProxyReq)
+  // 1. Check Origin/Signature (Permission check)
   const origin = req.headers.origin || req.headers.referer;
-  if (origin && !isOriginAllowed(origin)) {
+  // Use isOriginAllowed here which now correctly references ALLOWED_DOMAINS
+  if (origin && !isOriginAllowed(origin)) { 
     res.status(403).json({ error: ERROR_MESSAGES.FORBIDDEN });
     throw new Error(ERROR_MESSAGES.FORBIDDEN);
   } else if (!origin && !verifySignature(req, res)) {
-    // If signature verification fails, response was already sent by customFetch. Stop processing.
+    // If signature verification fails, verifySignature sends the 403 response
     throw new Error(ERROR_MESSAGES.FORBIDDEN);
   }
 
   // 2. Prepare Headers and Body
   const headers = new Headers();
   
-  // Copy necessary incoming headers, excluding those managed by Next.js or problematic for fetch
   Object.keys(req.headers).forEach((key) => {
     const headerKey = key.toLowerCase();
     if (!['host', 'content-length', 'connection', 'accept-encoding'].includes(headerKey)) {
@@ -107,23 +108,17 @@ const customFetch = async (
     }
   });
 
-  // Attach internal signature headers
   attachSignatureHeaders(req, headers);
   
-  // Prepare body based on method
   let body: BodyInit | undefined = undefined;
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-      // If bodyParser is set to false (see config export), req.body is a stream/buffer
-      // We must handle the raw body stream/buffer here, preserving the original content type
-      // We read the body into a buffer and send it directly with fetch
       let rawBody = req.body;
       if (typeof rawBody === 'undefined' || rawBody === null) {
           // No body available
       } else if (Buffer.isBuffer(rawBody)) {
           body = rawBody;
       } else {
-          // If body is already parsed (e.g., JSON), we stringify it back.
-          // This path is less safe if you handle mixed content types/streams.
+          // Fallback if body was parsed by accident (e.g., small JSON payload)
           body = JSON.stringify(rawBody);
           if (!headers.get('Content-Type')) {
             headers.set('Content-Type', 'application/json');
@@ -143,7 +138,6 @@ const customFetch = async (
   try {
     response = await fetch(targetUrl, options);
   } catch (e) {
-    // Catch network/connection errors only
     const errorMessage = e instanceof Error ? e.message : 'Unknown network error';
     console.warn(`[API Proxy] Network error to ${targetHost}: ${errorMessage}`);
     throw new Error('NETWORK_FAILURE');
@@ -155,7 +149,6 @@ const customFetch = async (
     throw new Error('SERVER_ERROR');
   }
 
-  // 5. Successful response (2xx, 3xx, or 4xx errors are forwarded to client)
   return response;
 };
 
@@ -165,7 +158,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const path = req.query.path as string[];
   const apiPath = '/' + path.join('/');
 
-  // Determine host based on path
   const isAuthEndpoint = apiPath.startsWith('/auth');
 
   const primaryHost = isAuthEndpoint ? AUTH_LOCAL_API_HOST : LOCAL_API_HOST;
@@ -183,7 +175,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         return; // Response already sent
       }
       primaryFailed = true;
-      console.warn(`[API Proxy] Primary request failed to ${primaryHost}${apiPath}. Proceeding to fallback.`);
+      console.warn(`[API Proxy] Primary request failed. Proceeding to fallback.`);
     }
   } else {
     primaryFailed = true;
@@ -197,7 +189,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (e instanceof Error && e.message === ERROR_MESSAGES.FORBIDDEN) {
         return; // Response already sent
       }
-      console.error(`[API Proxy] Fallback request also failed to ${fallbackHost}${apiPath}.`);
+      console.error(`[API Proxy] Fallback request also failed.`);
     }
   }
 
@@ -207,19 +199,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.status(finalResponse.status);
 
     finalResponse.headers.forEach((value, name) => {
-        // Exclude headers that should be handled by Next.js or cause issues
         if (!['content-encoding', 'transfer-encoding', 'connection'].includes(name.toLowerCase())) {
             res.setHeader(name, value);
         }
     });
 
-    // Handle cookies (Set-Cookie) manually
     const proxyCookies = finalResponse.headers.get('set-cookie');
     if (proxyCookies) {
       res.setHeader('Set-Cookie', proxyCookies);
     }
 
-    // Set anti-caching headers (from original code)
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -240,13 +229,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 }
 
-// Maximum request body size for API routes, aligned with backend limit for profile picture uploads
 const API_BODY_SIZE_LIMIT = process.env.API_BODY_SIZE_LIMIT || '8mb';
 
 export const config = {
   api: {
-    // Setting bodyParser to false requires manual body handling in customFetch, 
-    // but ensures compatibility with streaming and various content types.
+    // Ensures req.body is treated as a raw stream/buffer for generic proxy handling
     bodyParser: false,
     sizeLimit: API_BODY_SIZE_LIMIT,
     responseLimit: false,
